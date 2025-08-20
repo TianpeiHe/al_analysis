@@ -390,54 +390,107 @@ def connectome_wPNKC(connectome: str = 'hemibrain', *,
     def _first_underscore_part(ser):
         return _underscore_part(ser, i=0)
     
-    def add_compartment_column(wPNKC, shape):
+    # def add_compartment_column(wPNKC, shape):
+    #     print("add_compartment called")
+    #     if shape == 0:
+    #         # shell over sphere 
+    #         coords = wPNKC.index.to_frame(index=False)[['claw_x', 'claw_y', 'claw_z']]
+    #         # compute center of mass (centroid of all claws)
+    #         center_x = coords['claw_x'].mean()
+    #         center_y = coords['claw_y'].mean()
+    #         center_z = coords['claw_z'].mean()
+    #         center = np.array([center_x, center_y, center_z])
+
+    #         # compute max distance from center (bounding radius)
+    #         deltas = coords[['claw_x', 'claw_y', 'claw_z']].values - center
+    #         distances = np.linalg.norm(deltas, axis=1)
+
+    #         shell_r = distances.max()
+    #         sphere_r = shell_r * 0.5  # or adjust as needed
+
+    #         # assign compartment: 0 = inner sphere, 1 = outer shell
+    #         compartment_ids = np.where(distances <= sphere_r, 0, 1)
+
+    #         wPNKC = wPNKC.copy()
+    #         wPNKC['compartment'] = compartment_ids
+    #         print("shell over sphere")
+
+
+    #     else: 
+    #         # 3*3*3 situation 
+    #         # Extract claw coordinates from the MultiIndex
+    #         coords = wPNKC.index.to_frame(index=False)[['claw_x', 'claw_y', 'claw_z']]
+
+    #         # Compute the edges for each axis (3 bins → 4 edges)
+    #         x_edges = np.linspace(coords['claw_x'].min(), coords['claw_x'].max(), 4)
+    #         y_edges = np.linspace(coords['claw_y'].min(), coords['claw_y'].max(), 4)
+    #         z_edges = np.linspace(coords['claw_z'].min(), coords['claw_z'].max(), 4)
+
+    #         for edges in (x_edges, y_edges, z_edges):
+    #             edges[0] -= 1e-6
+    #             edges[-1] += 1e-6 
+
+    #         # Digitize each coordinate into bin indices (0–2)
+    #         ix = np.digitize(coords['claw_x'], x_edges) - 1
+    #         iy = np.digitize(coords['claw_y'], y_edges) - 1
+    #         iz = np.digitize(coords['claw_z'], z_edges) - 1
+
+            
+    #         # Flatten 3D (ix, iy, iz) into single compartment ID (0–26)
+    #         compartment_ids = ix * 9 + iy * 3 + iz
+
+    #         if (compartment_ids > 26).any():
+    #             print("Some compartment_ids > 26 detected!")
+    #             print(wPNKC.index[(compartment_ids > 26)])
+    #         elif (compartment_ids < 0).any():
+    #             print("Some compartment_ids < 0 detected!")
+    #             print(wPNKC.index[(compartment_ids < 0)])
+    #         else:
+    #             print("All compartment_ids normal")
+
+            
+    #         # Attach the compartment column to the DataFrame
+    #         wPNKC = wPNKC.copy()
+    #         wPNKC['compartment'] = compartment_ids
+
+    #     return wPNKC
+    
+    def add_compartment_index(wPNKC: pd.DataFrame, shape: int) -> pd.DataFrame:
+        """
+        Compute compartment IDs and attach them as an INDEX LEVEL named 'compartment'.
+        Returns a new DataFrame with the same rows, same glomerulus columns, and
+        an extra index level 'compartment'.
+        """
+        print("add_compartment_index called")
+
+        # Coordinates must be present as index levels
+        idx_names = list(wPNKC.index.names)
+        need = ['claw_x', 'claw_y', 'claw_z']
+        missing = [n for n in need if n not in idx_names]
+        assert not missing, f"Index missing levels required for compartments: {missing}"
+
+        coords = wPNKC.index.to_frame(index=False)[need]
 
         if shape == 0:
-            # shell over sphere 
-            coords = wPNKC.index.to_frame(index=False)[['claw_x', 'claw_y', 'claw_z']]
-            # compute center of mass (centroid of all claws)
-            center_x = coords['claw_x'].mean()
-            center_y = coords['claw_y'].mean()
-            center_z = coords['claw_z'].mean()
-            center = np.array([center_x, center_y, center_z])
-
-            # compute max distance from center (bounding radius)
-            deltas = coords[['claw_x', 'claw_y', 'claw_z']].values - center
-            distances = np.linalg.norm(deltas, axis=1)
-
+            # shell over sphere
+            center = coords.mean().to_numpy()
+            distances = np.linalg.norm(coords.to_numpy() - center, axis=1)
             shell_r = distances.max()
-            sphere_r = shell_r * 0.5  # or adjust as needed
-
-            # assign compartment: 0 = inner sphere, 1 = outer shell
-            compartment_ids = np.where(distances <= sphere_r, 0, 1)
-
-            wPNKC = wPNKC.copy()
-            wPNKC['compartment'] = compartment_ids
+            sphere_r = 0.5 * shell_r
+            compartment_ids = np.where(distances <= sphere_r, 0, 1).astype(np.int32)
             print("shell over sphere")
-
-
-        else: 
-            # 3*3*3 situation 
-            # Extract claw coordinates from the MultiIndex
-            coords = wPNKC.index.to_frame(index=False)[['claw_x', 'claw_y', 'claw_z']]
-
-            # Compute the edges for each axis (3 bins → 4 edges)
+        else:
+            # 3×3×3 grid
             x_edges = np.linspace(coords['claw_x'].min(), coords['claw_x'].max(), 4)
             y_edges = np.linspace(coords['claw_y'].min(), coords['claw_y'].max(), 4)
             z_edges = np.linspace(coords['claw_z'].min(), coords['claw_z'].max(), 4)
-
             for edges in (x_edges, y_edges, z_edges):
-                edges[0] -= 1e-6
-                edges[-1] += 1e-6 
-
-            # Digitize each coordinate into bin indices (0–2)
+                edges[0]  -= 1e-6
+                edges[-1] += 1e-6
             ix = np.digitize(coords['claw_x'], x_edges) - 1
             iy = np.digitize(coords['claw_y'], y_edges) - 1
             iz = np.digitize(coords['claw_z'], z_edges) - 1
-
-            
-            # Flatten 3D (ix, iy, iz) into single compartment ID (0–26)
-            compartment_ids = ix * 9 + iy * 3 + iz
+            compartment_ids = (ix * 9 + iy * 3 + iz).astype(np.int32)
 
             if (compartment_ids > 26).any():
                 print("Some compartment_ids > 26 detected!")
@@ -448,13 +501,34 @@ def connectome_wPNKC(connectome: str = 'hemibrain', *,
             else:
                 print("All compartment_ids normal")
 
-            
-            # Attach the compartment column to the DataFrame
-            wPNKC = wPNKC.copy()
-            wPNKC['compartment'] = compartment_ids
+        # Safety: length match
+        assert len(compartment_ids) == len(wPNKC), "compartment id length mismatch"
+
+        # Remove any existing compartment column/level to avoid duplicates
+        if 'compartment' in wPNKC.columns:
+            wPNKC = wPNKC.drop(columns=['compartment'])
+        if 'compartment' in (wPNKC.index.names or []):
+            wPNKC = wPNKC.reset_index('compartment', drop=True)
+
+        # Attach as an index level (appended at the end)
+        tmp = pd.Series(compartment_ids, index=wPNKC.index, name='compartment')
+        wPNKC = wPNKC.copy()
+        wPNKC = wPNKC.set_index(tmp, append=True)
+        # Ensure the level is named correctly (older pandas can lose the name)
+        names = list(wPNKC.index.names)
+        names[-1] = 'compartment'
+        wPNKC.index.set_names(names, inplace=True)
+
+        # Reorder so 'compartment' sits right after 'claw_z' if those exist
+        names = list(wPNKC.index.names)
+        if {'claw_x', 'claw_y', 'claw_z'}.issubset(names):
+            names_no_comp = [n for n in names if n != 'compartment']
+            insert_pos = names_no_comp.index('claw_z') + 1
+            new_order = names_no_comp[:insert_pos] + ['compartment'] + names_no_comp[insert_pos:]
+            wPNKC = wPNKC.reorder_levels(new_order).sort_index()
 
         return wPNKC
-    
+
 
     def _add_glomerulus_col_from_hemibrain_type(df: pd.DataFrame, pn_type_col: str,
         kc_id_col: str, *, check_no_multi_underscores: bool = False) -> pd.DataFrame:
@@ -992,9 +1066,13 @@ def connectome_wPNKC(connectome: str = 'hemibrain', *,
             # record how many claws total for your downstream sanity checks
             n_kcs = wPNKC.shape[0]
             if  claw_sp == True:
-                wPNKC = add_compartment_column(wPNKC, shape = 0)
+                wPNKC = add_compartment_index(wPNKC, shape = 0)
                 print("connectome_wPNKC compartment reached")
                 wPNKC.reset_index().to_csv('wPNKC_clustered_merged.csv', index=True)
+            else:
+                print("claw_sp is false")
+                
+
             
         else:
             data_path = repo_root / 'data/PNtoKC_connections_raw.xlsx'
@@ -1511,15 +1589,39 @@ def connectome_wPNKC(connectome: str = 'hemibrain', *,
         # row-aligned kc_types (same length/order as current wPNKC rows)
         assert len(kc_types) == len(wPNKC), "kc_types length mismatch"
 
-        # add as new index level and reorder nicely
-        wPNKC = wPNKC.set_index(kc_types.rename(KC_TYPE), append=True)
-        wPNKC = wPNKC.reorder_levels(
-            [kc_id_col, KC_TYPE, 'claw_id', 'claw_x', 'claw_y', 'claw_z']
-        ).sort_index()
+        kc_types = kc_types.reindex(wPNKC.index)
 
-        # I think this is only true the case that certain KCs are not dropped? 
-        if synapse_loc_path is None and synapse_con_path is None: 
-            assert kc_index.to_frame(index=False).equals(kc_ids_and_types.rename(columns={kc_id_col: KC_ID}))
+        # Add as new index level and reorder nicely
+        # Note: kc_types has already been cleaned and is aligned with wPNKC.
+        wPNKC = wPNKC.set_index(kc_types.rename(KC_TYPE), append=True)
+
+        if synapse_loc_path is not None and synapse_con_path is not None:
+            order = [kc_id_col, KC_TYPE, 'claw_id', 'claw_x', 'claw_y', 'claw_z']
+        else:
+            order = [KC_TYPE, KC_ID] # confused, why does the order for when synapse_loc_path is not none
+            # automatically have KC_ID?? 
+        if 'compartment' in wPNKC.index.names:
+            order.append('compartment')
+
+        # (Optional) sanity before reordering
+        levels = list(wPNKC.index.names)
+        print(f"order: {order}")
+        print(f"levels: {levels}")
+        assert set(order) <= set(levels), f"Missing levels: {set(order) - set(levels)}"
+        # Something wrong with this line... order probably contains kc_ids and kc_types? which is not allowed or sth?   
+        assert len(order) == len(levels), f"Index levels={levels}, order={order}"
+
+        wPNKC = wPNKC.reorder_levels(order).sort_index()
+
+
+        ## I am having trouble getting through this snippet of code: 
+        # kc_index = pd.MultiIndex.from_arrays([wPNKC.index, kc_types])
+        # if synapse_loc_path is not None and synapse_con_path is not None: 
+        #     assert kc_index.to_frame(index=False).equals(kc_ids_and_types.rename(columns={kc_id_col: KC_ID}))
+
+        #############################################################
+
+
         # (for hemibrain)
         # ipdb> kc_index.get_level_values(KC_TYPE).value_counts(dropna=False)
         # ab      802
@@ -1596,22 +1698,34 @@ def connectome_wPNKC(connectome: str = 'hemibrain', *,
         # NOTE: mean of this w/ connectome='hemibrain' is 5.44 (NOT n_claws=7 used
         # by uniform)
         n_inputs_per_kc = wPNKC.T.sum()
+        # Reset the index, ensuring to fill NaNs in the kc_type level
+        df_to_plot = n_inputs_per_kc.reset_index(name='n_claws')
+
+        # Now, use .fillna() on the 'kc_type' column to replace any NaNs
+        df_to_plot['kc_type'].fillna('unknown', inplace=True)
+        print("n_inputs_per_kc: \n", df_to_plot)
 
         # relevant for picking appropriate n_claws for uniform/hemidraw cases, or for
         # picking weight_divisor that produces closest avg to the n_claws=7 we had
         # already been using
-        avg_n_inputs_per_kc = n_inputs_per_kc.mean()
+        avg_n_inputs_per_kc = df_to_plot.mean()
 
         # so that the value column has a name after reset_index()
-        n_inputs_per_kc.name = 'n_claws'
-
+        df_to_plot.name = 'n_claws'
         # TODO label y-axis for two below (and *differently* for those above)?
 
         fig, ax = plt.subplots()
         sns.histplot(n_inputs_per_kc, discrete=True, ax=ax)
         ax.set_xlabel('# "claws" per KC\n(after processing connectome weights)')
+        
+        print("n_kcs: ", n_kcs)
+        print("connectome: ", connectome)
+        print("weight_divisor: ", weight_divisor)
+        print("avg_n_inputs_per_kc: ", avg_n_inputs_per_kc)
+
+        ### Something wrong with the data type of n_kcs; 
         ax.set_title(f'total inputs per KC\n{connectome=}\n{weight_divisor=}\n{n_kcs=}'
-            f'\nmean inputs per KC: {avg_n_inputs_per_kc:.2f}'
+             f'\nmean inputs per KC: {avg_n_inputs_per_kc.iloc[1]:.2f}'
         )
         # TODO why these look so different for fafb inputs (vs hemibrain)? for similar
         # avg_n_inputs_per_kc (adjusting fafb weight_divisor to roughly match the value
@@ -1624,16 +1738,17 @@ def connectome_wPNKC(connectome: str = 'hemibrain', *,
 
         # TODO refactor to share w/ above?
         fig, ax = plt.subplots()
-        sns.histplot(n_inputs_per_kc.reset_index(), discrete=True, ax=ax, x='n_claws',
+        sns.histplot(data=df_to_plot, discrete=True, ax=ax, x='n_claws',
             hue=KC_TYPE, hue_order=kc_type_hue_order
         )
         ax.set_xlabel('# "claws" per KC\n(after processing connectome weights)')
         ax.set_title(f'total inputs per KC\n{connectome=}\n{weight_divisor=}\n{n_kcs=}'
-            f'\nmean inputs per KC: {avg_n_inputs_per_kc:.2f}'
+            f'\nmean inputs per KC: {avg_n_inputs_per_kc.iloc[1]:.2f}'
         )
         savefig(fig, plot_dir, f'wPNKC_nclaws-sum-per-KC_hist_{connectome}_by-kc-type',
             bbox_inches='tight'
         )
+
         #
 
         # TODO also plot sums within glomeruli?
@@ -1753,7 +1868,7 @@ def connectome_APL_weights(connectome: str = 'hemibrain', *,
     # 14     74
     # 15     50
     # 16     43
-    # 17     35
+    # 17     35 
     # 18     40
     # 19     35
     # 20     39
@@ -1970,6 +2085,9 @@ def connectome_APL_weights(connectome: str = 'hemibrain', *,
 
         print("wAPLKC nonzero:", (wAPLKC != 0).sum(), "of", len(wAPLKC))
         print("wKCAPL nonzero:", (wKCAPL != 0).sum(), "of", len(wKCAPL))
+        print("wAPLKC size: ", wAPLKC.size)
+        print("wKCAPL size: ", wKCAPL.size)
+
 
         # Which types have zero max?
         zero_types_apl = wAPLKC_max_weight_by_type.index[wAPLKC_max_weight_by_type.eq(0)]
@@ -2255,7 +2373,7 @@ _seen_plot_dirs = set()
 def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
     tune_on_hallem: bool = False, pn2kc_connections: str = 'hemibrain',
     use_connectome_APL_weights: bool = False, weight_divisor: Optional[float] = None,
-    _wPNKC: Optional[pd.DataFrame] = None, _wPNKC_one_row_per_claw: bool = True,
+    _wPNKC: Optional[pd.DataFrame] = None, _wPNKC_one_row_per_claw: bool = False,
     n_claws: Optional[int] = None, drop_multiglomerular_receptors: bool = True,
     drop_receptors_not_in_hallem: bool = False, seed: int = 12345,
     target_sparsity: Optional[float] = None,
@@ -2263,7 +2381,7 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
     _use_matt_wPNKC=False, _drop_glom_with_plus=True,
     _add_back_methanoic_acid_mistake=False, equalize_kc_type_sparsity: bool = False,
     ab_prime_response_rate_target: Optional[float] = None,
-    homeostatic_thrs: bool = False, claw_sp: bool = True, 
+    homeostatic_thrs: bool = False, claw_sp: bool = False, 
     fixed_thr: Optional[Union[float, np.ndarray]] = None,
     # TODO TODO TODO support vector on these? or how else? (want to be able to boost
     # them)
@@ -2284,7 +2402,7 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
     #    glomeruli?)
     # 2) KCs w/ more input from periphery
     multiresponder_APL_boost: Optional[float] = None, _multiresponder_mask: Optional[pd.Series] = None,
-    boost_wKCAPL: Literal[False, True, 'only'] = False, spatial_wPNKC: bool = True, 
+    boost_wKCAPL: Literal[False, True, 'only'] = False, 
 ) -> Tuple[pd.DataFrame, Optional[pd.DataFrame], Dict[str, Any]]:
     # TODO doc point of sim_odors. do we need to pass them in (not typically, no)?
     # (even when neither tuning nor running on any hallem data?)
@@ -2843,7 +2961,11 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
     )
 
     kc_types = None
+    rv = osm.RunVars(mp)
     if _wPNKC is None:
+        spatial_wPNKC = _wPNKC_one_row_per_claw
+        if spatial_wPNKC:
+            claw_sp = spatial_wPNKC
         
         # one_claw_per_row = True
         if spatial_wPNKC:
@@ -2859,12 +2981,13 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
             )
             print("spatial_wPNKC in fit_mb_model")
             print(wPNKC.columns)
-            if 'compartment' in wPNKC.columns:
+            if 'compartment' in wPNKC.index.names:
                 print("compartments were here at wPNKC creation")
-            wPNKC.reset_index().to_csv('test_spatial_wPNKC.csv', index=True)
-            
-            
-            
+                rv.kc.claw_compartments = wPNKC.index.get_level_values('compartment').to_numpy(np.int32, copy=True)
+                claw_comp = rv.kc.claw_compartments
+                print(f"comp_size={claw_comp.size}, n_rows={len(wPNKC)}")
+                assert claw_comp.size == len(wPNKC), "compartment length mismatch"
+            wPNKC.reset_index().to_csv('test_spatial_wPNKC.csv', index=True)            
         # one_claw_per_row = False 
         else:
             wPNKC = connectome_wPNKC(
@@ -2878,7 +3001,10 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
         if KC_TYPE in wPNKC.index.names:
             kc_types = wPNKC.index.get_level_values(KC_TYPE)
             kc_id_col = "b.bodyId"  # your KC id level name
-            expected  = [kc_id_col, "claw_id", "claw_x", "claw_y", "claw_z"]
+            if(_wPNKC_one_row_per_claw):
+                expected  = [kc_id_col, "claw_id", "claw_x", "claw_y", "claw_z", "compartment"]
+            else:
+                expected  = [KC_ID]
 
             # 1) If kc_type is an index level, drop it first
             if KC_TYPE in wPNKC.index.names:
@@ -2886,23 +3012,28 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
 
             # 2) Now make sure we have exactly the five levels we expect (in any order)
             present = list(wPNKC.index.names)
+            print(present)
             missing = [n for n in expected if n not in present]
             extras  = [n for n in present  if n not in expected]
             assert not missing, f"Missing index levels: {missing}; have {present}"
             assert not extras,  f"Unexpected index levels: {extras}; expected only {expected}"
 
-            # 3) Reorder to the exact order you want, then assert
-            wPNKC = wPNKC.reorder_levels(expected)
-            assert list(wPNKC.index.names) == expected, f"Got {list(wPNKC.index.names)}"
+            if(_wPNKC_one_row_per_claw):
+                # 3) Reorder to the exact order you want, then assert
+                wPNKC = wPNKC.reorder_levels(expected)
+                assert list(wPNKC.index.names) == expected, f"Got {list(wPNKC.index.names)}"
 
         glomerulus_index = wPNKC.columns
+        
 
-        if use_connectome_APL_weights:
-            wAPLKC, wKCAPL = connectome_APL_weights(
-                connectome=connectome,
-                wPNKC=wPNKC,
-                plot_dir=plot_dir
-            )
+        # I am guesssing that we don't need this; it will be called later on? 
+        # but the parameters used is a little different, not sure how much this matters? 
+        # if use_connectome_APL_weights:
+        #     wAPLKC, wKCAPL = connectome_APL_weights(
+        #         connectome=connectome,
+        #         wPNKC=wPNKC,
+        #         plot_dir=plot_dir
+        #     )
         
     else:
         wPNKC = _wPNKC.copy()
@@ -3345,9 +3476,22 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
         # level by name, perhaps 'kc_id').
         claw_levels = {claw_id} | set(claw_coord_levels)
         kc_id_levels = set(wPNKC.index.names) - claw_levels
-        assert len(kc_id_levels) == 1
-        kc_id = kc_id_levels.pop()
+        # there's an extra index: compartment
+        if(_wPNKC_one_row_per_claw):
+            assert len(kc_id_levels) == 2
+        else:
+            assert len(kc_id_levels) == 1
+        print(kc_id_levels)
+        kc_id_col = "b.bodyId"   # ← single source of truth
+        assert kc_id_col in wPNKC.index.names, f"Missing KC id level: {kc_id_col}"
 
+        kc_id = kc_id_col
+        idx = wPNKC.index.to_frame(index=False)
+        
+        print(kc_id)
+        dups_mask = idx.duplicated([kc_id, claw_id], keep=False)
+        print("[dup count]", dups_mask.sum())
+        print(idx.loc[dups_mask, [kc_id, claw_id, 'compartment' if 'compartment' in idx else kc_id]].head(20))
         assert not wPNKC.index.to_frame(index=False)[[kc_id, claw_id]].duplicated(
             ).any()
 
@@ -3389,6 +3533,41 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
 
         n_kcs = len(set(kc_ids))
         mp.kc.N = n_kcs
+
+        # a list of kc_ids equal to the size of num_claws
+        kc_ids = np.asarray(kc_ids, dtype=np.int64)
+
+        # Compact body IDs to 0..N-1 (first-appearance order)
+        id2compact = {}
+        compact = np.empty(kc_ids.shape[0], dtype=np.int32)
+        next_idx = 0
+        for i, bid in enumerate(kc_ids):
+            b = int(bid)
+            idx = id2compact.get(b)
+            if idx is None:
+                idx = next_idx
+                id2compact[b] = idx
+                next_idx += 1
+            compact[i] = idx
+        N = int(next_idx)
+
+        # Ensure params agree (or update them)
+        assert getattr(mp.kc, "N", N) == N, f"p.kc.N ({mp.kc.N}) must equal unique KCs ({N})"
+
+        # Overwrite mapping at runtime
+        rv.kc.claw_to_kc = compact  # len=num_claws
+
+        # Build kc_to_claws
+        kc_to_claws = [[] for _ in range(N)]
+        for claw_idx, kc_idx in enumerate(compact):
+            kc_to_claws[int(kc_idx)].append(int(claw_idx))
+        rv.kc.kc_to_claws = kc_to_claws
+
+        # Sanity
+        assert compact.min() >= 0 and compact.max() < N
+        assert sum(len(v) for v in kc_to_claws) == len(compact)
+        print(f"[OK] N={N}, num_claws={len(compact)}, first buckets={[len(v) for v in kc_to_claws[:5]]}")
+
 
         # TODO TODO TODO implement in olfsysm (-> use for determining which claws to
         # consider as part of one KC)
@@ -3481,6 +3660,7 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
         mp.kc.preset_wAPLKC = True
         mp.kc.preset_wKCAPL = True
 
+    
     # TODO what was taking up enough memory for this process to be killed?
     # happened on first _use_matt_wPNKC=True call in a run of:
     # ./al_analysis.py -d pebbled -n 6f -t 2023-04-22 -e 2023-06-22
@@ -3530,12 +3710,14 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
         mp.kc.save_spike_recordings = True
         mp.kc.save_inh_sims = True
         mp.kc.save_Is_sims = True
+        print("save figs are set to true")
         # if `mp.kc.ves_p == 0`, the "vesicle depletion" part of olfsysm is disabled.
         # see related comments around use of nves_sims below.
         if mp.kc.ves_p != 0:
             mp.kc.save_nves_sims = True
 
-    rv = osm.RunVars(mp)
+    # declared eariler for rv.kc.claw_compartment to enter;
+    #rv = osm.RunVars(mp)
 
     # TODO need to support int type too (and in all similar isinstance calls)?
     # isinstance(<int>, float) is False
@@ -3701,8 +3883,13 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
     # This is the only place where build_wPNKC and fit_sparseness are called, and they
     # are only called if the 3rd parameter (regen=) is True.
     
-    
-    osm.run_KC_sims(mp, rv, spatial_wPNKC, claw_sp, True)
+    # Something happened here.. possibly because of how wAPLKC size didn't match up? 
+    # There should be some mechanism to translate use_connectome_APL weights into olfsysm. 
+
+    # spatial_wPNKC = True ->wPNKC_one_claw_per_row
+    # we want the argument to be True to equal to the row set as KC; 
+    KC_row = not spatial_wPNKC
+    osm.run_KC_sims(mp, rv, KC_row, claw_sp, True)
 
     tuning_time_s = time.time() - before_any_tuning
 
