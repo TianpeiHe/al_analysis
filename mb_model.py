@@ -2868,6 +2868,9 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
     # TODO TODO TODO support vector on these? or how else? (want to be able to boost
     # them)
     wAPLKC: Optional[float] = None, wKCAPL: Optional[float] = None,
+    # pn_claw_to_APL: if it's true, in sim_KC_layer, we take pn_t to calculate claw_to_apl 
+    # drive instead of inheriting from KC_acitivity 
+    pn_claw_to_APL: bool = False, 
     #
     print_olfsysm_log: Optional[bool] = None, return_dynamics: bool = False,
     plot_dir: Optional[Path] = None, make_plots: bool = True,
@@ -3366,7 +3369,6 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
 
         assert sfr_from_csv.shape[1] == 1
         sfr_from_csv = sfr_from_csv.iloc[:, 0].copy()
-
         assert sfr_for_csv.equals(sfr_from_csv)
         # changing abbreviations of some odors broke this previously
         # (hence why i replaced it w/ the two assertions below. now ignoring odor
@@ -3454,7 +3456,7 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
             # it seems he had at one point also tried 1.0, but i'm assuming 1.5 is the
             # latest value he intended to use
             #mp.kc.sp_lr_coeff = 1.0
-            mp.kc.sp_lr_coeff = 10
+            mp.kc.sp_lr_coeff = 10.0
 
             warn('hardcoding new defaults for _wPNKC_one_row_per_claw=True case:\n'
                 f'{mp.kc.max_iters=} (was {old_max_iters})\n'
@@ -3551,6 +3553,10 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
         if APL_coup_const is not None: 
             mp.kc.apl_coup_const = APL_coup_const
 
+        if pn_claw_to_APL:
+            mp.kc.pn_claw_to_APL = True
+            mp.kc.zero_wAPLKC = True
+
         # mp.kc.apl_coup_const = APL_coup_const        
 
     # if isinstance(wPNKC.index, pd.MultiIndex) and (KC_TYPE in wPNKC.index.names):
@@ -3584,6 +3590,7 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
         glomerulus_index = wPNKC.columns.get_level_values("glomerulus") 
     else:
         glomerulus_index = wPNKC.columns
+        print("glomerulus_index.size: ", glomerulus_index.shape)
     if not hallem_input:
         zero_filling = (~ glomerulus_index.isin(orn_deltas.index))
         if zero_filling.any():
@@ -3687,7 +3694,6 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
             warn(f'imputing mean Hallem SFR ({mean_sfr:.2f}) for non-Hallem glomeruli:'
                 f' {non_hallem_gloms}'
             )
-
         sfr = pd.Series(index=glomerulus_index,
             data=[(sfr.loc[g] if g in sfr else mean_sfr) for g in glomerulus_index]
         )
@@ -3899,7 +3905,9 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
                 ])
                 msg += '\n'
        
-    # TODO try removing .copy()?
+    # TODO try removing .copy()?        
+    # if 'DA4m' in sfr.index:
+    #     sfr = sfr.drop(index='DA4m')
     mp.orn.data.spont = sfr.copy()
     mp.orn.data.delta = orn_deltas.copy()
     # TODO need to remove DA4m (2a) from wPNKC first too (already out, it seems)?
@@ -4327,6 +4335,7 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
 
     # for i, arr in enumerate(rv.orn.sims):
     #     print(f"Shape of array at index {i}: {arr.shape}")
+
     osm.run_ORN_LN_sims(mp, rv)
     osm.run_PN_sims(mp, rv)
     before_any_tuning = time.time()
@@ -7646,14 +7655,24 @@ def fit_and_plot_mb_model(plot_dir: Path, sensitivity_analysis: bool = False,
         wAPLKC = param_dict.get('wAPLKC', None)
         # TODO need to support int type too (in all isinstance calls below)?
         # isinstance(<int>, float) is False
-        if wAPLKC is not None and not isinstance(wAPLKC, float):
+        wAPLKC_check = False
+
+        # temporarily convert it to array to match the size check 
+        wAPLKC_size_check_temp = np.asarray(wAPLKC)
+        # convert wAPLKC to array
+        if not use_connectome_APL_weights: 
+            if wAPLKC_size_check_temp.size == 1: 
+                wAPLKC_check = isinstance(wAPLKC,float)
+            else: 
+                wAPLKC_check = True
+
+        if wAPLKC is not None and not wAPLKC_check:
             # only want to pop anything in this branch, cause other code depends on
             # these values still being in param_dict
             # TODO TODO is that true for any variable_n_claws cases? any of those depend
             # on them still being in param dict?
             wAPLKC = param_dict.pop('wAPLKC')
             wKCAPL = param_dict.pop('wKCAPL')
-
             if not variable_n_claws:
                 # TODO will this always be true? added after other assertions here
                 assert use_connectome_APL_weights
@@ -7689,7 +7708,9 @@ def fit_and_plot_mb_model(plot_dir: Path, sensitivity_analysis: bool = False,
             wKCAPL = param_dict['wKCAPL']
             # TODO need to support int type too (in both of the two isinstance calls
             # below)? isinstance(<int>, float) is False
-            assert wKCAPL is None or isinstance(wKCAPL, float)
+            wKCAPL_size_check_temp = np.asarray(wKCAPL)
+            if wKCAPL_size_check_temp.size == 1:
+                assert wKCAPL is None or isinstance(wKCAPL, float)
 
         # In n_seeds=1 case, param_dict keys are:
         # 'fixed_thr', 'wAPLKC', and 'wKCAPL' (all w/ scalar values)
@@ -14302,9 +14323,19 @@ def main():
     '''
     #   APL_coup_const = 0.8,
     # APL_coup_const = [0.5, 0.5],
+    # APL_coup_const = 0.8,
+    APL_coup_const = 0.00
+    Btn_separate = True
+    pn_claw_to_APL = True
     try_each_with_kws = [
-        dict(_wPNKC_one_row_per_claw=False,  Btn_separate = True)
+        dict(_wPNKC_one_row_per_claw = False, Btn_separate = False)
     ]
+
+    for i, kws in enumerate(try_each_with_kws):
+        if kws.get('_wPNKC_one_row_per_claw') and kws.get('pn_claw_to_APL'):
+            raise ValueError(
+                f"Config #{i}: _wPNKC_one_row_per_claw=True is incompatible with pn_claw_to_APL=True."
+            )
 
     for extra_kws in try_each_with_kws:
         # extra_kws will override kws without warning, if they have common keys
