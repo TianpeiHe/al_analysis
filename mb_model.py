@@ -48,6 +48,7 @@ import warnings
 
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 from pandas import IndexSlice as idx
 import xarray as xr
 import matplotlib
@@ -664,6 +665,7 @@ def connectome_wPNKC(connectome: str = 'hemibrain', *, prat_claws: bool = False,
     drop_kcs_with_no_input: bool = True, _drop_glom_with_plus: bool = True,
     # TODO reconsider handling of synapse_*_path kwargs, and DBSCAN related param kws
     synapse_con_path: Optional[Path] = None, synapse_loc_path: Optional[Path] = None,
+    per_claw_compartment: bool = False, 
     cluster_eps: float = 1.9, cluster_min_samples: int = 3, Btn_separate: bool = False,
     preset_Btn_coord: bool = False, Btn_divide_per_glom: bool = True,
     Btn_num_per_glom: Optional[int] = 10) -> pd.DataFrame:
@@ -724,16 +726,84 @@ def connectome_wPNKC(connectome: str = 'hemibrain', *, prat_claws: bool = False,
         return _underscore_part(ser, i=0)
 
     claw_coord_cols = ['claw_x', 'claw_y', 'claw_z']
-    def add_compartment_index(wPNKC: pd.DataFrame, shape: int) -> pd.DataFrame:
-        # TODO delete shape!=0 path? (currently unused) or will it be in some of his
-        # other attempts at defining APL compartments? what are other values shape=
-        # might take? (doc + validate)
+
+    def build_claw_distance_matrix(wPNKC: pd.DataFrame, shape: int) -> pd.DataFrame:
+        assert shape == 2
+        # --- 1) Grab coordinates from the index ---
+        idx_names = list(wPNKC.index.names)
+        claw_coord_cols = ["claw_x", "claw_y", "claw_z"]
+        for c in claw_coord_cols:
+            assert c in idx_names, f"Expected index level {c} in wPNKC.index.names, got {idx_names}"
+
+        # index -> DataFrame -> numpy array of shape (N, 3)
+        coords_df = wPNKC.index.to_frame(index=False)[claw_coord_cols]
+        coords = coords_df.to_numpy(dtype=float)
+        n = coords.shape[0]
+
+        if n == 0:
+            # trivial edge case
+            return pd.DataFrame(dtype="Sparse[float64]")
+
+        # --- 2) Build dense matrix then sparsify (ok for moderate N) ---
+        k = 11  # number of nearest neighbors to keep per row
+        mat = np.zeros((n, n), dtype=float)
+
+        for i in range(n):
+            # distances from claw i to all claws
+            diff = coords - coords[i]              # (n x 3)
+            dists = np.sqrt(np.sum(diff * diff, axis=1))  # (n,)
+
+            # exclude self
+            dists[i] = np.inf
+
+            # how many neighbors we can actually keep
+            k_i = min(k, n - 1)
+            if k_i <= 0:
+                continue
+
+            # indices of k_i smallest distances (nearest neighbors)
+            nn_idx = np.argpartition(dists, k_i)[:k_i]
+            nn_dists = dists[nn_idx]
+
+            # safety: drop any inf just in case
+            finite_mask = np.isfinite(nn_dists)
+            nn_idx = nn_idx[finite_mask]
+            nn_dists = nn_dists[finite_mask]
+            if nn_dists.size == 0:
+                continue
+
+            # --- 3) Normalize to [0, 1] per row ---
+            # 1 = closest, 0 = farthest among the kept neighbors
+            d_min = nn_dists.min()
+            d_max = nn_dists.max()
+            if d_max > d_min:
+                weights = 1.0 - (nn_dists - d_min) / (d_max - d_min)
+            else:
+                # all distances equal -> just give them weight 1
+                weights = np.ones_like(nn_dists)
+
+            # fill this row of the dense matrix
+            mat[i, nn_idx] = weights
+
+        # --- 4) make into sparse
+        distance_matrix = sp.csr_matrix(mat)
+
+        return distance_matrix
+
+    def add_compartment_index(wPNKC: pd.DataFrame, shape: int):
         """
         Compute compartment IDs and attach them as an INDEX LEVEL named 'compartment'.
-        Returns a new DataFrame with the same rows, same glomerulus columns, and
-        an extra index level 'compartment'.
+        Returns:
+            wPNKC_with_compartment, claw_distance_matrix
+
+        For shape == 2:
+            - each claw gets its own compartment ID
+            - claw_distance_matrix is a sparse claw×claw matrix
+
+        For shape != 2:
+            - claw_distance_matrix is an empty 0×0 sparse DataFrame
         """
-        # to ensure we don't accidentally changed input dataframe
+        # to ensure we don't accidentally change input dataframe
         wPNKC = wPNKC.copy()
 
         # Coordinates must be present as index levels
@@ -744,29 +814,29 @@ def connectome_wPNKC(connectome: str = 'hemibrain', *, prat_claws: bool = False,
 
         coords = wPNKC.index.to_frame(index=False)[need]
 
+        # default: empty "no value" matrix for non-shape-2 cases
+        claw_distance_matrix = pd.DataFrame().astype("Sparse[float64]")
+
         if shape == 0:
             # shell over sphere
             center = coords.mean().to_numpy()
             distances = np.linalg.norm(coords.to_numpy() - center, axis=1)
             shell_r = distances.max()
-            # TODO TODO allow overriding sphere_r w/ kwarg? or (also) define to equalize
-            # across two? or allow passing in absolute radius?
             sphere_r = 0.5 * shell_r
             compartment_ids = np.where(distances <= sphere_r, 0, 1).astype(np.int32)
-            # TODO delete (/ put behind verbose)
             print("shell over sphere")
-        else:
-            # TODO refactor to loop over claw_coord_cols?
+
+        elif shape == 1:
             # 3×3×3 grid
-            x_edges = np.linspace(coords['claw_x'].min(), coords['claw_x'].max(), 4)
-            y_edges = np.linspace(coords['claw_y'].min(), coords['claw_y'].max(), 4)
-            z_edges = np.linspace(coords['claw_z'].min(), coords['claw_z'].max(), 4)
+            x_edges = np.linspace(coords["claw_x"].min(), coords["claw_x"].max(), 4)
+            y_edges = np.linspace(coords["claw_y"].min(), coords["claw_y"].max(), 4)
+            z_edges = np.linspace(coords["claw_z"].min(), coords["claw_z"].max(), 4)
             for edges in (x_edges, y_edges, z_edges):
                 edges[0]  -= 1e-6
                 edges[-1] += 1e-6
-            ix = np.digitize(coords['claw_x'], x_edges) - 1
-            iy = np.digitize(coords['claw_y'], y_edges) - 1
-            iz = np.digitize(coords['claw_z'], z_edges) - 1
+            ix = np.digitize(coords["claw_x"], x_edges) - 1
+            iy = np.digitize(coords["claw_y"], y_edges) - 1
+            iz = np.digitize(coords["claw_z"], z_edges) - 1
             compartment_ids = (ix * 9 + iy * 3 + iz).astype(np.int32)
 
             if (compartment_ids > 26).any():
@@ -778,34 +848,41 @@ def connectome_wPNKC(connectome: str = 'hemibrain', *, prat_claws: bool = False,
             else:
                 print("All compartment_ids normal")
 
+        elif shape == 2:
+            # every compartment has its own ID
+            compartment_ids = np.arange(len(wPNKC), dtype=np.int32)
+            # build actual distance matrix
+            claw_distance_matrix = build_claw_distance_matrix(wPNKC, shape)
+
+        else:
+            raise ValueError(f"Unknown compartment shape: {shape}")
+
         # Safety: length match
         assert len(compartment_ids) == len(wPNKC), "compartment id length mismatch"
 
         # Remove any existing compartment column/level to avoid duplicates
-        if 'compartment' in wPNKC.columns:
-            wPNKC = wPNKC.drop(columns=['compartment'])
+        if "compartment" in wPNKC.columns:
+            wPNKC = wPNKC.drop(columns=["compartment"])
 
-        # TODO delete. should never trigger
-        assert 'compartment' not in wPNKC.index.names
-        #
+        assert "compartment" not in wPNKC.index.names
 
         # Attach as an index level (appended at the end)
-        tmp = pd.Series(compartment_ids, index=wPNKC.index, name='compartment')
+        tmp = pd.Series(compartment_ids, index=wPNKC.index, name="compartment")
         wPNKC = wPNKC.set_index(tmp, append=True)
-        assert wPNKC.index.names[-1] == 'compartment'
+        assert wPNKC.index.names[-1] == "compartment"
 
         # Reorder so 'compartment' sits right after 'claw_z' if those exist
         names = list(wPNKC.index.names)
         if set(claw_coord_cols).issubset(names):
-            names_no_comp = [n for n in names if n != 'compartment']
-            insert_pos = names_no_comp.index('claw_z') + 1
+            names_no_comp = [n for n in names if n != "compartment"]
+            insert_pos = names_no_comp.index("claw_z") + 1
             new_order = (
-                names_no_comp[:insert_pos] + ['compartment'] +
+                names_no_comp[:insert_pos] + ["compartment"] +
                 names_no_comp[insert_pos:]
             )
             wPNKC = wPNKC.reorder_levels(new_order)
 
-        return wPNKC
+        return wPNKC, claw_distance_matrix
 
 
     # TODO also expose _drop_glom_with_plus in here? (and just default to value from
@@ -2021,7 +2098,7 @@ def connectome_wPNKC(connectome: str = 'hemibrain', *, prat_claws: bool = False,
             #breakpoint()
             #
 
-
+        # Equivalent to _wPNKC_one_row_per_claw being true; 
         elif synapse_con_path is not None and synapse_loc_path is not None:
             # used in title of histograms later
             # TODO or does the other one contain more of the important info? use both?
@@ -2225,7 +2302,16 @@ def connectome_wPNKC(connectome: str = 'hemibrain', *, prat_claws: bool = False,
 
             # record how many claws total for your downstream sanity checks
             n_kcs = wPNKC.shape[0]
-            wPNKC = add_compartment_index(wPNKC, shape=0)
+
+            # add_compartment_index shape:
+            # shape = 0: shell over sphere
+            # shape = 1: 3*3 grid
+            # shape = 2: every claw has it's own compartment; 
+            if per_claw_compartment: 
+                shape = 2
+            else:
+                shape = 0
+            wPNKC, claw_distance_matrix = add_compartment_index(wPNKC, shape)
 
             # TODO why are pre_cell_ids still a column? are they only added to index
             # outside of connectome_wPNKC (no, only seem referenced in here...)? rectify
@@ -2752,7 +2838,7 @@ def connectome_wPNKC(connectome: str = 'hemibrain', *, prat_claws: bool = False,
     # TODO option to also return a version of (long-form) df, so i can use for a test
     # comparing old + new hemibrain version, as i'm currently doing w/ sloppy code
     # above?
-    return wPNKC
+    return wPNKC, claw_distance_matrix
 
 # TODO TODO TODO make sure this is only loading connections from calyx (might be
 # already? i assume lobe[/other? are there other?] connections not relevant for calyx /
@@ -3740,6 +3826,7 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
     drop_receptors_not_in_hallem: bool = False, seed: int = 12345,
     target_sparsity: Optional[float] = None,
     target_sparsity_factor_pre_APL: Optional[float] = None,
+    per_claw_compartment: bool = False, 
     APL_coup_const: Optional[float] = None,
     Btn_separate: bool = False, preset_Btn_coord: bool = False,
     Btn_divide_per_glom: bool = True, Btn_num_per_glom: Optional[int] = 10,
@@ -4373,7 +4460,7 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
             # TODO TODO make sure the claw metadata is saved somewhere, if it isn't
             # already (probably just in fit_and_plot..., just making sure we are
             # returning it in something from this fn)
-            wPNKC = connectome_wPNKC(
+            wPNKC, claw_distance_matrix = connectome_wPNKC(
                 connectome=connectome,
                 prat_claws=prat_claws,
                 dist_weight=dist_weight,
@@ -4383,6 +4470,7 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
                 synapse_con_path=synapse_con_path,
                 synapse_loc_path=synapse_loc_path,
                 #
+                per_claw_compartment = per_claw_compartment,
                 plot_dir=plot_dir if pn2kc_connections in connectome_options else None,
                 _use_matt_wPNKC=_use_matt_wPNKC,
                 drop_kcs_with_no_input=drop_kcs_with_no_input,
@@ -4404,7 +4492,7 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
                     index=True
                 )
         else:
-            wPNKC = connectome_wPNKC(
+            wPNKC, claw_distance_matrix= connectome_wPNKC(
                 connectome=connectome,
                 weight_divisor=weight_divisor,
                 # TODO TODO TODO doc why we even need to call connectome_wPNKC in
@@ -4454,6 +4542,10 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
         # TODO raise ValueError if this passed in non-one-row-per-claw case
         if APL_coup_const is not None:
             mp.kc.apl_coup_const = APL_coup_const
+
+        if claw_distance_matrix.shape[0] > 0 and claw_distance_matrix.nnz > 0:
+            mp.kc.claw_distance_matrix = claw_distance_matrix 
+
 
     # TODO check kc_index here instead of wPNKC.index?
     if KC_TYPE in wPNKC.index.names:
@@ -5171,7 +5263,7 @@ def fit_mb_model(orn_deltas: Optional[pd.DataFrame] = None, sim_odors=None, *,
         for claw_idx, kc_idx in enumerate(compact):
             kc_to_claws[int(kc_idx)].append(int(claw_idx))
         rv.kc.kc_to_claws = kc_to_claws
-
+    
         # TODO add assertions checking kc_to_claws is correct?
 
     # make a map for PN->Btn map; so each glom, what Btn index are associated with that;
@@ -15072,33 +15164,37 @@ def main():
         #
     ]
 
-    for extra_kws in try_each_with_kws:
-        # extra_kws will override kws without warning, if they have common keys
-        param_dict = fit_and_plot_mb_model(plot_root, orn_deltas=orn_deltas,
-            try_cache=False,
-            # TODO disable _plot_example_dynamics (resource intensive)?
-            #_plot_example_dynamics=True,
-            **{**kws, **extra_kws}
-        )
-        output_dir = (plot_root / param_dict['output_dir']).resolve()
-        assert output_dir.is_dir()
-        assert output_dir.parent == plot_root
+    ### TO RESTORE AFTER TEST;;
+    ### TAKES WAY TO LONG TO RUN THROUGH ALL OF THESE
+    # for extra_kws in try_each_with_kws:
+    #     # extra_kws will override kws without warning, if they have common keys
+    #     param_dict = fit_and_plot_mb_model(plot_root, orn_deltas=orn_deltas,
+    #         try_cache=False,
+    #         # TODO disable _plot_example_dynamics (resource intensive)?
+    #         #_plot_example_dynamics=True,
+    #         **{**kws, **extra_kws}
+    #     )
+    #     output_dir = (plot_root / param_dict['output_dir']).resolve()
+    #     assert output_dir.is_dir()
+    #     assert output_dir.parent == plot_root
 
-        #           2h @ -3  IaA @ -3  pa @ -3  ...  1-6ol @ -3  benz @ -3  ms @ -3
-        # kc_id         ...
-        # 0             0.0       0.0      0.0  ...         0.0        0.0      0.0
-        # 1             0.0       0.0      0.0  ...             0.0        0.0      0.0
-        # ...           ...       ...      ...  ...         ...        ...      ...
-        # 1835          1.0       1.0      2.0  ...         1.0        0.0      0.0
-        # 1836          0.0       0.0      0.0  ...         0.0        0.0      0.0
-        df = pd.read_csv(output_dir / 'spike_counts.csv', index_col=KC_ID)
+    #     #           2h @ -3  IaA @ -3  pa @ -3  ...  1-6ol @ -3  benz @ -3  ms @ -3
+    #     # kc_id         ...
+    #     # 0             0.0       0.0      0.0  ...         0.0        0.0      0.0
+    #     # 1             0.0       0.0      0.0  ...             0.0        0.0      0.0
+    #     # ...           ...       ...      ...  ...         ...        ...      ...
+    #     # 1835          1.0       1.0      2.0  ...         1.0        0.0      0.0
+    #     # 1836          0.0       0.0      0.0  ...         0.0        0.0      0.0
+    #     df = pd.read_csv(output_dir / 'spike_counts.csv', index_col=KC_ID)
+    ### 
+
 
     # TODO TODO also include an example w/ kiwi/control data (as used by natmix_data)
     # (either committing data in al_analysis too, or moving this whole example to
     # another repo)
     # TODO + add test i can reproduce those outputs (use outputs i already sent someone
     # from my kiwi/control data? sent to ruoyi? or someone else?)
-    import ipdb; ipdb.set_trace()
+    # import ipdb; ipdb.set_trace()
 
     # TODO also include equalize_kc_type_sparsity=False for all below
     # TODO TODO pick from kwargs described in comments below
@@ -15274,7 +15370,7 @@ def main():
         # (and maybe include in titles?)
         #
         # probably always want `kws` unmodified too. that's what this empty dict is for.
-        dict(),
+        dict(), 
 
         dict(use_connectome_APL_weights=True),
     ]
@@ -15282,11 +15378,10 @@ def main():
     #   APL_coup_const = 0.8,
     # APL_coup_const = [0.5, 0.5],
     # APL_coup_const = 0.8,
-    APL_coup_const = 0.00
     Btn_separate = True
     pn_claw_to_APL = True
     try_each_with_kws = [
-        dict(_wPNKC_one_row_per_claw = True, pn_claw_to_APL = True, APL_coup_const = 0.00, Btn_separate = False)
+        dict(_wPNKC_one_row_per_claw = True, APL_coup_const = 0.0, per_claw_compartment = True, Btn_separate = False)
     ]
 
     for i, kws in enumerate(try_each_with_kws):
